@@ -566,8 +566,8 @@ mkQualifiedHsForAllTy     ctxt ty = mkHsForAllTy Qualified []  ctxt ty
 
 mkHsForAllTy :: HsExplicitFlag -> [LHsTyVarBndr RdrName] -> LHsContext RdrName -> LHsType RdrName -> HsType RdrName
 -- Smart constructor for HsForAllTy
-mkHsForAllTy exp tvs (L _ []) ty
-  = HsForAllTy exp Nothing (mkHsQTvs tvs) (L noSrcSpan []) ty
+mkHsForAllTy exp tvs (L l []) ty
+  = HsForAllTy exp Nothing (mkHsQTvs tvs) (L l []) ty
 mkHsForAllTy exp tvs ctxt     ty
   = HsForAllTy exp extra   (mkHsQTvs tvs) cleanCtxt        ty
   where -- Separate the extra-constraints wildcard when present
