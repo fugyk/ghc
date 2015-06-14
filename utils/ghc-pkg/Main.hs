@@ -138,6 +138,7 @@ data Flag
   | FlagVerbosity (Maybe String)
   | FlagIPId
   | FlagPackageKey
+  | FlagViewFile
   deriving Eq
 
 flags :: [OptDescr Flag]
@@ -184,6 +185,8 @@ flags = [
         "interpret package arguments as installed package IDs",
   Option [] ["package-key"] (NoArg FlagPackageKey)
         "interpret package arguments as installed package keys",
+  Option [] ["view-file"] (NoArg FlagViewFile)
+        "pass view as file address in place of view name",
   Option ['v'] ["verbose"] (OptArg FlagVerbosity "Verbosity")
         "verbosity level (0-2, default 1)"
   ]
@@ -290,6 +293,22 @@ usageHeader prog = substProg prog $
   "    is recached; to recache a different DB use --user or --package-db\n" ++
   "    as appropriate.\n" ++
   "\n" ++
+  "  $p view {create | delete | list-packages} {view-name | view-file}\n" ++
+  "    create and delete, creates and deletes a view of specified name\n" ++
+  "    respectively. list-packages list all the package in the view. Use\n" ++
+  "    --view-file to pass view as file address. With --view-file create\n" ++
+  "    will symlink the view in database to that file, list-packages\n" ++
+  "    will list packages in file and delete will delete the file." ++
+  "\n" ++
+  "  $p list-views\n" ++
+  "    Lists all views in the DB" ++
+  "\n" ++
+  "  $p view-modify {view | view-file} {add-package | remove-package} {pkg}\n" ++
+  "    Modifies the view or view-file if --view-file to passed. add-package\n" ++
+  "    adds a package to the view. Only one version of one package can be\n" ++
+  "    added in a view. remove-package removes the package from view.\n" ++
+  "\n" ++
+
   " Substring matching is supported for {module} in find-module and\n" ++
   " for {pkg} in list, describe, and field, where a '*' indicates\n" ++
   " open substring ends (prefix*, *suffix, *infix*).  Use --ipid to\n" ++
@@ -481,6 +500,23 @@ runit verbosity cli nonopts = do
     ["recache"] -> do
         recache verbosity cli
 
+    ["view", action, view] -> do
+        case action of
+            "create" -> createView verbosity view cli
+            "delete" -> deleteView verbosity view cli
+            "list-packages" -> listPackagesInView verbosity view cli
+            _ -> bye (usageInfo (usageHeader prog) flags)
+
+    ["list-views"] -> do
+        listViews verbosity cli
+
+    ["view-modify", view, action, pkgarg_str] -> do
+        pkgarg <- readPackageArg as_arg pkgarg_str
+        case action of
+            "add-package" -> addPackageToView verbosity view pkgarg cli
+            "remove-package" -> removePackageFromView verbosity view pkgarg cli
+            _ -> bye (usageInfo (usageHeader prog) flags)
+
     [] -> do
         die ("missing command\n" ++ shortUsage prog)
     (_cmd:_) -> do
@@ -517,6 +553,15 @@ globVersion = Version [] ["*"]
 -- -----------------------------------------------------------------------------
 -- Package databases
 
+data View
+  = View {
+    nameOfView :: String,
+    locationOfView :: FilePath,
+    symlinkedLocation :: Maybe FilePath,
+    packagesInView :: Maybe [InstalledPackageId]
+    -- If view file is broken then Nothing
+  }
+
 -- Some commands operate on a single database:
 --      register, unregister, expose, hide, trust, distrust
 -- however these commands also check the union of the available databases
@@ -535,7 +580,8 @@ data PackageDB
       -- On the other hand we need the absolute path in a few places
       -- particularly in relation to the ${pkgroot} stuff.
       
-      packages :: [InstalledPackageInfo]
+      packages :: [InstalledPackageInfo],
+      views :: [View]
     }
 
 type PackageDBStack = [PackageDB]
@@ -667,13 +713,18 @@ getPkgDatabases verbosity modify use_user use_cache expand_vars my_flags = do
   let flag_db_stack = [ db | db_name <- flag_db_names,
                         db <- db_stack, location db == db_name ]
 
+  let all_pkgs = concatMap packages db_stack
+      db_stack' = map (checkDBConsistency all_pkgs) db_stack
+      flag_db_stack' = map (checkDBConsistency all_pkgs) flag_db_stack
+
   when (verbosity > Normal) $ do
     infoLn ("db stack: " ++ show (map location db_stack))
     infoLn ("modifying: " ++ show to_modify)
     infoLn ("flag db stack: " ++ show (map location flag_db_stack))
 
-  return (db_stack, to_modify, flag_db_stack)
-
+  return (db_stack', to_modify, flag_db_stack')
+  where checkDBConsistency all_pkgs db =
+          db{ views = map (flip checkViewConsistency all_pkgs) $ views db }
 
 lookForPackageDBIn :: FilePath -> IO (Maybe FilePath)
 lookForPackageDBIn dir = do
@@ -683,6 +734,49 @@ lookForPackageDBIn dir = do
     let path_file = dir </> "package.conf"
     exists_file <- doesFileExist path_file
     if exists_file then return (Just path_file) else return Nothing
+
+getViewsInLocation :: FilePath -> IO [View]
+getViewsInLocation path = do
+  e <- tryIO $ getDirectoryContents path
+  case e of
+    Left err -> return []
+    Right list_of_files ->
+      mapM getViewFromFile $
+        (map ((</>) path) $ filter (".view" `isSuffixOf`) list_of_files)
+
+getViewFromFile :: FilePath  -> IO View
+getViewFromFile file = do
+    contents <- readFile file
+    let pkgs_s = lines contents
+    sfile <- tryIO $ readSymbolicLink (file)
+    return View {
+            nameOfView = takeBaseName file,
+            locationOfView = file,
+            symlinkedLocation = (case sfile of
+                                  (Left _) -> Nothing
+                                  (Right f) -> Just f),
+            packagesInView = Just (map InstalledPackageId pkgs_s)
+          }
+
+-- Perform consistency check by doing two operations
+-- 1. Check that each line in file is Installed package ID of some package
+-- 2. Checks only one instance of any package is present in the view
+-- If found inconsistent packagesInView is set to Nothing
+checkViewConsistency :: View -> [InstalledPackageInfo] -> View
+checkViewConsistency v all_pkgs =
+    v {packagesInView = (packagesInView v) >>= (mapM getPkg) >>= invalidateDup}
+  where
+    getPkg pkg =
+      if ((matchesPkg (IPId pkg)) `any` all_pkgs)
+        then Just pkg
+        else Nothing
+    invalidateDup :: [InstalledPackageId] -> Maybe [InstalledPackageId]
+    invalidateDup pkgs_ipid = let pkgs_id = map toPackageName pkgs_ipid
+      in if (pkgs_id == nub pkgs_id)
+           then Just pkgs_ipid
+           else Nothing
+
+    toPackageName (InstalledPackageId s) = fst $ break (== '-') s
 
 readParseDatabase :: Verbosity
                   -> Maybe (FilePath,Bool)
@@ -780,10 +874,12 @@ readParseDatabase verbosity mb_user_conf modify use_cache path
 
     mkPackageDB pkgs = do
       path_abs <- absolutePath path
+      viewsInDb <- getViewsInLocation (path_abs </> "views")
       return PackageDB {
         location = path,
         locationAbsolute = path_abs,
-        packages = pkgs
+        packages = pkgs,
+        views = viewsInDb
       }
 
 parseSingletonPackageConf :: Verbosity -> FilePath -> IO InstalledPackageInfo
@@ -854,6 +950,14 @@ mungePackagePaths top_dir pkgroot pkg =
                               Just cs@(c : _) | isPathSeparator c -> Just cs
                               _ -> Nothing
 
+getModifiablePkgDB :: Verbosity -> [Flag] -> [Char] -> IO PackageDB
+getModifiablePkgDB verbosity my_flags error_string = do
+  (db_stack, Just to_modify, _flag_dbs) <-
+     getPkgDatabases verbosity True{-modify-} True{-use user-} False{-no cache-}
+                               False{-expand vars-} my_flags
+  let ret = my_head error_string $ filter ((== to_modify).location) db_stack
+  when (verbosity > Normal) $ infoLn ("Databse selected for " ++ error_string ++ ": " ++ locationAbsolute ret)
+  return $ my_head error_string $ filter ((== to_modify).location) db_stack
 
 -- -----------------------------------------------------------------------------
 -- Workaround for old single-file style package dbs
@@ -892,7 +996,8 @@ tryReadParseOldFileStyleDatabase verbosity mb_user_conf modify use_cache path = 
          else   return $ Just PackageDB {
                    location         = path,
                    locationAbsolute = path_abs,
-                   packages         = []
+                   packages         = [],
+                   views = []
                  }
 
     -- if the path is not a file, or is not an empty db then we fail
@@ -929,7 +1034,8 @@ initPackageDB filename verbosity _flags = do
   filename_abs <- absolutePath filename
   changeDB verbosity [] PackageDB {
                           location = filename, locationAbsolute = filename_abs,
-                          packages = []
+                          packages = [],
+                          views = []
                         }
 
 -- -----------------------------------------------------------------------------
@@ -1023,9 +1129,13 @@ mungePackageInfo ipi = ipi { packageKey = packageKey' }
 -- -----------------------------------------------------------------------------
 -- Making changes to a package database
 
-data DBOp = RemovePackage InstalledPackageInfo
-          | AddPackage    InstalledPackageInfo
-          | ModifyPackage InstalledPackageInfo
+data DBOp = RemovePackage         InstalledPackageInfo
+          | AddPackage            InstalledPackageInfo
+          | ModifyPackage         InstalledPackageInfo
+          | CreateView            View
+          | DeleteView            View
+          | AddPackageToView      View InstalledPackageId PackageDBStack
+          | RemovePackageFromView View PackageArg PackageDBStack
 
 changeDB :: Verbosity -> [DBOp] -> PackageDB -> IO ()
 changeDB verbosity cmds db = do
@@ -1033,6 +1143,7 @@ changeDB verbosity cmds db = do
   db'' <- adjustOldFileStylePackageDB db'
   createDirectoryIfMissing True (location db'')
   changeDBDir verbosity cmds db''
+  updateDBCache verbosity db''
 
 updateInternalDB :: PackageDB -> [DBOp] -> PackageDB
 updateInternalDB db cmds = db{ packages = foldl do_cmd (packages db) cmds }
@@ -1047,7 +1158,6 @@ updateInternalDB db cmds = db{ packages = foldl do_cmd (packages db) cmds }
 changeDBDir :: Verbosity -> [DBOp] -> PackageDB -> IO ()
 changeDBDir verbosity cmds db = do
   mapM_ do_cmd cmds
-  updateDBCache verbosity db
  where
   do_cmd (RemovePackage p) = do
     let file = location db </> display (installedPackageId p) <.> "conf"
@@ -1059,6 +1169,52 @@ changeDBDir verbosity cmds db = do
     writeUTF8File file (showInstalledPackageInfo p)
   do_cmd (ModifyPackage p) = 
     do_cmd (AddPackage p)
+  do_cmd (CreateView v) = do
+    let file = locationOfView v
+    fileAlreadyExists <- doesFileExist (locationOfView v)
+    when (fileAlreadyExists) $ die "View already exists. To overwrite first delete the view"
+    createDirectoryIfMissing True (takeDirectory (locationOfView v))
+    when (verbosity > Normal) $ infoLn ("writing " ++ file)
+    case symlinkedLocation v of
+      Nothing -> writeFile file ""
+      (Just f) -> createSymbolicLink f file
+  do_cmd (DeleteView v) = do
+    let file = locationOfView v
+    when (verbosity > Normal) $ infoLn ("removing " ++ file)
+    removeFileSafe file
+  do_cmd (AddPackageToView v p@( InstalledPackageId ps ) pkgdbstack) = do
+    let mpkgs = packagesInView v
+    when (verbosity > Normal) $ infoLn ("Adding package " ++ ps)
+    case mpkgs of
+      (Just pkgs) -> updateView
+        (checkViewConsistency v{ packagesInView = Just (p:pkgs) } $ concatMap packages pkgdbstack)
+      Nothing -> die "Not well formed view file"
+  do_cmd (RemovePackageFromView v p pkgdbstack) = do
+    let mpkgs = packagesInView v
+    -- when (verbosity > Normal) $ infoLn ("Removing package " ++ ps)
+    case mpkgs of
+      (Just pkgs) -> do remaining <- filterM (\x -> fmap not (argMatchesId p x pkgdbstack)) pkgs
+                        updateView (v{ packagesInView = Just remaining})
+      Nothing -> die "Not well formed view file"
+    where argMatchesId :: PackageArg -> InstalledPackageId -> PackageDBStack -> IO Bool
+          argMatchesId arg id pkgdbstack = do dbPkgListTuple <- findPackagesByDB pkgdbstack (IPId id)
+                                              return $
+                                                case dbPkgListTuple of
+                                                  [] -> False
+                                                  ((_, pkgList):xs) ->
+                                                    case pkgList of
+                                                      [] -> False
+                                                      -- As ipid matches only single package one check is enough
+                                                      (pkginfo:xs) -> arg `matchesPkg` pkginfo
+
+  updateView :: View -> IO ()
+  updateView v@(View n l _ p) = do
+    case p of
+      Nothing ->
+        (die ("Modification of view will leave view in bad state. exiting."))
+      -- Not running strictness check in p will keep the file locked
+      -- which we are tring to write as packages are read lazily
+      Just pkgs -> writeFile ((length (show p)) `seq` l) (unlines $ map display pkgs)
 
 updateDBCache :: Verbosity -> PackageDB -> IO ()
 updateDBCache verbosity db = do
@@ -1201,14 +1357,9 @@ modifyPackage fn pkgarg verbosity my_flags force = do
 
 recache :: Verbosity -> [Flag] -> IO ()
 recache verbosity my_flags = do
-  (db_stack, Just to_modify, _flag_dbs) <- 
-     getPkgDatabases verbosity True{-modify-} True{-use user-} False{-no cache-}
-                               False{-expand vars-} my_flags
-  let
-        db_to_operate_on = my_head "recache" $
-                           filter ((== to_modify).location) db_stack
+  db <- getModifiablePkgDB verbosity my_flags "recache"
   --
-  changeDB verbosity [] db_to_operate_on
+  changeDB verbosity [] db
 
 -- -----------------------------------------------------------------------------
 -- Listing packages
@@ -1339,6 +1490,97 @@ showPackageDot verbosity myflags = do
   putStrLn "}"
 
 -- -----------------------------------------------------------------------------
+-- View operations
+
+findView :: PackageDBStack -> [Char] -> Bool -> IO (View, PackageDB)
+findView pkgDBStack name as_file =
+  if (as_file)
+    then do
+      v <- (getViewFromFile name)
+      return (checkViewConsistency v (concatMap packages pkgDBStack), last pkgDBStack)
+    else (return $ my_head ("No view found of name " ++ name) [ (head viewList, db)
+         | db <- pkgDBStack,
+           let viewList = filter (\v -> nameOfView v == name) (views db),
+           not (null viewList) ])
+
+deleteView :: Verbosity -> [Char] -> [Flag] -> IO ()
+deleteView verbosity view my_flags = do
+  (_, _, flag_db_stack) <-
+    getPkgDatabases verbosity False{-modify-} False{-use user-}
+                            True{-use cache-} False{-expand vars-} my_flags
+  (v, d) <- findView flag_db_stack view (FlagViewFile `elem` my_flags)
+  changeDBDir verbosity [DeleteView v] d
+
+createView :: Verbosity -> [Char] -> [Flag] -> IO ()
+createView verbosity view_s my_flags = do
+  db <- getModifiablePkgDB verbosity my_flags "view create"
+  let view = if FlagViewFile `elem` my_flags
+          then View {
+            nameOfView = takeBaseName view_s,
+            locationOfView = location db </> "views" </> takeBaseName view_s <.> "view",
+            symlinkedLocation = Just view_s,
+            packagesInView = Just []
+          }
+          else View {
+            nameOfView = view_s,
+            locationOfView = (location db) </> "views" </> view_s <.> "view",
+            symlinkedLocation = Nothing,
+            packagesInView = Just []
+          }
+  changeDBDir verbosity [CreateView view] db
+
+listViews :: Verbosity -> [Flag] -> IO ()
+listViews verbosity my_flags = do
+  (_, _, flag_db_stack) <-
+    getPkgDatabases verbosity False{-modify-} False{-use user-}
+                            True{-use cache-} False{-expand vars-} my_flags
+
+  mapM_ (\db -> do  putStrLn $ (location db) ++ ":"
+                    if null $ views db
+                      then putStrLn "  (No Views)"
+                      else mapM_ displayView $ views db) flag_db_stack
+  where
+    displayView v = do
+      putStr $ "  " ++ (nameOfView v)
+      when (isNothing (packagesInView v))
+        (putStr " (Broken view file)")
+      putStr "\n"
+
+listPackagesInView :: Verbosity -> [Char] -> [Flag] -> IO ()
+listPackagesInView verbosity view my_flags = do
+  (_, _, flag_db_stack) <-
+    getPkgDatabases verbosity False{-modify-} False{-use user-}
+                            True{-use cache-} False{-expand vars-} my_flags
+  (view, _) <- findView flag_db_stack view (FlagViewFile `elem` my_flags)
+  displayView flag_db_stack view
+  where
+    displayView flag_db_stack v = do
+      let v' = checkViewConsistency v (concat $ map packages flag_db_stack)
+      case (packagesInView v') of
+        Nothing -> putStrLn "Broken view file"
+        Just pkgs -> mapM_ (putStrLn . display) pkgs
+
+addPackageToView :: Verbosity -> [Char] -> PackageArg -> [Flag] -> IO ()
+addPackageToView verbosity view pkgarg my_flags = do
+  (db_stack, _, flag_db_stack) <-
+    getPkgDatabases verbosity False{-modify-} False{-use user-}
+                            True{-use cache-} False{-expand vars-} my_flags
+  -- Both view and package must be searched in entire DB Stack to allow usage of
+  -- global packages in user database
+  (view', pkgdb) <- findView flag_db_stack view (FlagViewFile `elem` my_flags)
+  pkg <- getFirstPackageId flag_db_stack pkgarg
+  changeDBDir verbosity [AddPackageToView view' pkg db_stack] pkgdb
+
+removePackageFromView :: Verbosity -> [Char] -> PackageArg -> [Flag] -> IO ()
+removePackageFromView verbosity view pkgarg my_flags = do
+  (_, _, flag_db_stack) <-
+    getPkgDatabases verbosity False{-modify-} False{-use user-}
+                            True{-use cache-} False{-expand vars-} my_flags
+  (view', pkgdb) <- findView flag_db_stack view (FlagViewFile `elem` my_flags)
+  -- pkg <- getFirstPackageId flag_db_stack pkgarg
+  changeDBDir verbosity [RemovePackageFromView view' pkgarg flag_db_stack] pkgdb
+
+-- -----------------------------------------------------------------------------
 -- Prints the highest (hidden or exposed) version of a package
 
 -- ToDo: This is no longer well-defined with package keys, because the
@@ -1408,6 +1650,12 @@ findPackagesByDB db_stack pkgarg
         pkg_msg (PkgKey pk)          = display pk
         pkg_msg (IPId ipid)          = display ipid
         pkg_msg (Substring pkgpat _) = "matching " ++ pkgpat
+
+getFirstPackageId :: PackageDBStack -> PackageArg -> IO (InstalledPackageId)
+getFirstPackageId db_stack pkgarg = do
+  pd <- findPackagesByDB db_stack pkgarg
+  let (_, ipinfos) = my_head "No package found" pd
+  return (installedPackageId . head $ ipinfos)
 
 matches :: PackageIdentifier -> PackageIdentifier -> Bool
 pid `matches` pid'
