@@ -1172,7 +1172,9 @@ changeDBDir verbosity cmds db = do
   do_cmd (CreateView v) = do
     let file = locationOfView v
     fileAlreadyExists <- doesFileExist (locationOfView v)
-    when (fileAlreadyExists) $ die "View already exists. To overwrite first delete the view"
+    when (fileAlreadyExists) $ do
+      when (verbosity > Normal) $ infoLn ("removing older " ++ file)
+      removeFileSafe file
     createDirectoryIfMissing True (takeDirectory (locationOfView v))
     when (verbosity > Normal) $ infoLn ("writing " ++ file)
     case symlinkedLocation v of
