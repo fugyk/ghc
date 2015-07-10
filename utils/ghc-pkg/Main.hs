@@ -746,8 +746,7 @@ getViewsInLocation path = do
 
 getViewFromFile :: FilePath  -> IO View
 getViewFromFile file = do
-    contents <- readFile file
-    let pkgs_s = lines contents
+    e <- tryIO $ readFile file
     sfile <- tryIO $ readSymbolicLink (file)
     return View {
             nameOfView = takeBaseName file,
@@ -755,8 +754,12 @@ getViewFromFile file = do
             symlinkedLocation = (case sfile of
                                   (Left _) -> Nothing
                                   (Right f) -> Just f),
-            packagesInView = Just (map InstalledPackageId pkgs_s)
+            packagesInView = (case e of
+                               (Left err) -> Nothing
+                               (Right contents) -> pkgs contents)
           }
+  where
+    pkgs str = Just (map InstalledPackageId (lines str))
 
 -- Perform consistency check by doing two operations
 -- 1. Check that each line in file is Installed package ID of some package
