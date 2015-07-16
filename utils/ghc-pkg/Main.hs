@@ -1336,6 +1336,7 @@ modifyPackage fn pkgarg verbosity my_flags force = do
       pkgs    = packages db
 
       pks = map packageKey ps
+      pkgids = map installedPackageId ps
 
       cmds = [ fn pkg | pkg <- pkgs, packageKey pkg `elem` pks ]
       new_db = updateInternalDB db cmds
@@ -1347,6 +1348,8 @@ modifyPackage fn pkgarg verbosity my_flags force = do
       new_broken = brokenPackages (allPackagesInStack new_stack)
       newly_broken = filter ((`notElem` map packageKey old_broken)
                             . packageKey) new_broken
+      brokenViews = filter (isPkgsInView pkgids)
+                              (concatMap views db_stack)
   --
   let displayQualPkgId pkg
         | [_] <- filter ((== pkgid) . sourcePackageId)
@@ -1357,8 +1360,16 @@ modifyPackage fn pkgarg verbosity my_flags force = do
   when (not (null newly_broken)) $
       dieOrForceAll force ("unregistering would break the following packages: "
               ++ unwords (map displayQualPkgId newly_broken))
+  when (not (null brokenViews)) $
+      dieOrForceAll force ("unregistering would break the following views: "
+              ++ unwords (map nameOfView brokenViews))
 
   changeDB verbosity cmds db
+  where
+    isPkgsInView pkgids view = case packagesInView view of
+      Nothing -> False
+      Just pkgsv -> not $ null
+        [pkgid | pkgid <- pkgids, pkgidv <- pkgsv, pkgid == pkgidv]
 
 recache :: Verbosity -> [Flag] -> IO ()
 recache verbosity my_flags = do
@@ -1540,10 +1551,14 @@ listViews verbosity my_flags = do
     getPkgDatabases verbosity False{-modify-} False{-use user-}
                             True{-use cache-} False{-expand vars-} my_flags
 
-  mapM_ (\db -> do  putStrLn $ (location db) ++ ":"
-                    if null $ views db
-                      then putStrLn "  (No Views)"
-                      else mapM_ displayView $ views db) flag_db_stack
+  mapM_ (\db ->
+    if (FlagSimpleOutput `elem` my_flags)
+    then mapM_ (\v -> unless (isNothing (packagesInView v)) $
+                  putStr $ "  " ++ nameOfView v) $ views db
+    else do putStrLn $ (location db) ++ ":"
+            if null $ views db
+            then putStrLn "  (No Views)"
+            else mapM_ displayView $ views db) flag_db_stack
   where
     displayView v = do
       putStr $ "  " ++ (nameOfView v)
