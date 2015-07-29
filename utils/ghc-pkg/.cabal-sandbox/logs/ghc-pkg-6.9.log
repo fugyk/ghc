@@ -1,0 +1,39 @@
+Configuring ghc-pkg-6.9...
+Building ghc-pkg-6.9...
+Preprocessing executable 'ghc-pkg' for ghc-pkg-6.9...
+[2 of 2] Compiling Main             ( Main.hs, dist/dist-sandbox-ac36d2f1/build/ghc-pkg/ghc-pkg-tmp/Main.o )
+
+Main.hs:1266:49: error:
+    Ambiguous occurrence ‘depends’
+    It could refer to either ‘Distribution.Package.depends’,
+                             imported from ‘Distribution.Package’ at Main.hs:22:1-55
+                          or ‘Cabal.depends’,
+                             imported from ‘Distribution.InstalledPackageInfo’ at Main.hs:19:1-49
+
+Main.hs:1491:29: error:
+    Ambiguous occurrence ‘depends’
+    It could refer to either ‘Distribution.Package.depends’,
+                             imported from ‘Distribution.Package’ at Main.hs:22:1-55
+                          or ‘Cabal.depends’,
+                             imported from ‘Distribution.InstalledPackageInfo’ at Main.hs:19:1-49
+
+Main.hs:1764:51: error:
+    Ambiguous occurrence ‘depends’
+    It could refer to either ‘Distribution.Package.depends’,
+                             imported from ‘Distribution.Package’ at Main.hs:22:1-55
+                          or ‘Cabal.depends’,
+                             imported from ‘Distribution.InstalledPackageInfo’ at Main.hs:19:1-49
+
+Main.hs:1855:30: error:
+    Ambiguous occurrence ‘depends’
+    It could refer to either ‘Distribution.Package.depends’,
+                             imported from ‘Distribution.Package’ at Main.hs:22:1-55
+                          or ‘Cabal.depends’,
+                             imported from ‘Distribution.InstalledPackageInfo’ at Main.hs:19:1-49
+
+Main.hs:1856:26: error:
+    Ambiguous occurrence ‘depends’
+    It could refer to either ‘Distribution.Package.depends’,
+                             imported from ‘Distribution.Package’ at Main.hs:22:1-55
+                          or ‘Cabal.depends’,
+                             imported from ‘Distribution.InstalledPackageInfo’ at Main.hs:19:1-49
